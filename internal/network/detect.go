@@ -29,13 +29,22 @@ func (DefaultProber) Probe(ctx context.Context, interfaceName string, mac net.Ha
 }
 
 type route struct {
+	Type        string   `json:"type"`
 	Destination string   `json:"dst"`
 	Gateway     string   `json:"gateway"`
 	Device      string   `json:"dev"`
 	Protocol    string   `json:"protocol"`
 	Scope       string   `json:"scope"`
+	Source      string   `json:"from"`
+	PrefSource  string   `json:"prefsrc"`
 	Metric      int      `json:"metric"`
+	TOS         int      `json:"tos"`
 	Flags       []string `json:"flags"`
+
+	// forwardingKey preserves every observed route attribute except dst so
+	// redundant routes can be recognized without maintaining an allowlist of
+	// iproute2 attributes.
+	forwardingKey string
 }
 
 type link struct {
@@ -120,8 +129,6 @@ func Detect(ctx context.Context, runner command.Runner, prober Prober, root stri
 		return plan, append(issues, blocker("default-route", "no IPv4 or IPv6 default route is active"))
 	}
 	plan.InterfaceName = interfaceName
-	issues = append(issues, inspectRouteSet(v4Routes, v4Default, interfaceName, "IPv4")...)
-	issues = append(issues, inspectRouteSet(v6Routes, v6Default, interfaceName, "IPv6")...)
 
 	if policyIssues := inspectRules(ctx, runner); len(policyIssues) > 0 {
 		issues = append(issues, policyIssues...)
@@ -249,6 +256,8 @@ func Detect(ctx context.Context, runner command.Runner, prober Prober, root stri
 		plan.IPv6.GatewayOnLink = hasFlag(v6Default.Flags, "onlink") || gatewayOutside(v6Default.Gateway, append(v6Static, v6Dynamic...))
 	}
 	plan.IPv6.UsePeerDNS = plan.IPv6.DHCP
+	issues = append(issues, inspectRouteSet(v4Routes, v4Default, interfaceName, "IPv4", plan.IPv4.Mode == "dhcp")...)
+	issues = append(issues, inspectRouteSet(v6Routes, v6Default, interfaceName, "IPv6", false)...)
 
 	plan.DNS = detectDNS(ctx, runner, root, interfaceName)
 	if len(plan.DNS) == 0 && plan.IPv4.Mode == "static" && !plan.IPv6.DHCP {
@@ -296,9 +305,33 @@ func readRoutes(ctx context.Context, runner command.Runner, family string) ([]ro
 	if err != nil {
 		return nil, err
 	}
-	var routes []route
-	if err := json.Unmarshal(output, &routes); err != nil {
+	routes, err := decodeRoutes(output)
+	if err != nil {
 		return nil, fmt.Errorf("parse %s routes: %w", family, err)
+	}
+	return routes, nil
+}
+
+func decodeRoutes(output []byte) ([]route, error) {
+	var encoded []json.RawMessage
+	if err := json.Unmarshal(output, &encoded); err != nil {
+		return nil, err
+	}
+	routes := make([]route, len(encoded))
+	for index, value := range encoded {
+		if err := json.Unmarshal(value, &routes[index]); err != nil {
+			return nil, err
+		}
+		var attributes map[string]json.RawMessage
+		if err := json.Unmarshal(value, &attributes); err != nil {
+			return nil, err
+		}
+		delete(attributes, "dst")
+		canonical, err := json.Marshal(attributes)
+		if err != nil {
+			return nil, err
+		}
+		routes[index].forwardingKey = string(canonical)
 	}
 	return routes, nil
 }
@@ -324,7 +357,7 @@ func selectDefault(routes []route, family string) (*route, *model.Issue) {
 	return &selected, nil
 }
 
-func inspectRouteSet(routes []route, defaultRoute *route, interfaceName, family string) []model.Issue {
+func inspectRouteSet(routes []route, defaultRoute *route, interfaceName, family string, allowRedundantDHCPRoutes bool) []model.Issue {
 	var issues []model.Issue
 	for _, candidate := range routes {
 		if isDefaultRoute(candidate.Destination) {
@@ -341,9 +374,105 @@ func inspectRouteSet(routes []route, defaultRoute *route, interfaceName, family 
 		if defaultRoute != nil && candidate.Gateway == "" && isGatewayHostRoute(candidate.Destination, defaultRoute.Gateway) {
 			continue
 		}
+		if allowRedundantDHCPRoutes && isRedundantDHCPRoute(candidate, defaultRoute) {
+			issues = append(issues, model.Issue{
+				Severity: model.SeverityInfo,
+				Code:     "redundant-dhcp-route",
+				Message:  fmt.Sprintf("%s route %s matches the selected DHCP default path and needs no separate translation", family, candidate.Destination),
+			})
+			continue
+		}
 		issues = append(issues, blocker("unsupported-route", fmt.Sprintf("%s route %s (protocol %s) cannot be preserved by v1", family, candidate.Destination, emptyRouteValue(protocol))))
 	}
 	return issues
+}
+
+func isRedundantDHCPRoute(candidate route, defaultRoute *route) bool {
+	// A more-specific route can be omitted only when falling through to the
+	// DHCP default route produces the exact same forwarding behavior. This is
+	// deliberately stricter than accepting every route labeled proto dhcp.
+	if defaultRoute == nil || !isDefaultRoute(defaultRoute.Destination) || isDefaultRoute(candidate.Destination) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(candidate.Protocol), "dhcp") || !strings.EqualFold(strings.TrimSpace(defaultRoute.Protocol), "dhcp") {
+		return false
+	}
+	if normalizeRouteType(candidate.Type) != "unicast" || normalizeRouteType(defaultRoute.Type) != "unicast" {
+		return false
+	}
+	if candidate.Device == "" || candidate.Device != defaultRoute.Device || !sameRouteAddress(candidate.Gateway, defaultRoute.Gateway) {
+		return false
+	}
+	if !isIPv4RouteDestination(candidate.Destination) {
+		return false
+	}
+	if candidate.forwardingKey != "" || defaultRoute.forwardingKey != "" {
+		return candidate.forwardingKey != "" && candidate.forwardingKey == defaultRoute.forwardingKey
+	}
+	return normalizeRouteScope(candidate.Scope) == normalizeRouteScope(defaultRoute.Scope) &&
+		candidate.Source == defaultRoute.Source &&
+		sameOptionalRouteAddress(candidate.PrefSource, defaultRoute.PrefSource) &&
+		candidate.Metric == defaultRoute.Metric &&
+		candidate.TOS == defaultRoute.TOS &&
+		sameRouteFlags(candidate.Flags, defaultRoute.Flags)
+}
+
+func isIPv4RouteDestination(destination string) bool {
+	destination = strings.TrimSpace(destination)
+	if address, err := netip.ParseAddr(destination); err == nil {
+		return address.Is4()
+	}
+	prefix, err := netip.ParsePrefix(destination)
+	return err == nil && prefix.Addr().Is4()
+}
+
+func sameRouteAddress(left, right string) bool {
+	leftAddress, leftErr := netip.ParseAddr(strings.TrimSpace(left))
+	rightAddress, rightErr := netip.ParseAddr(strings.TrimSpace(right))
+	return leftErr == nil && rightErr == nil && leftAddress.WithZone("") == rightAddress.WithZone("")
+}
+
+func sameOptionalRouteAddress(left, right string) bool {
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
+		return strings.TrimSpace(left) == strings.TrimSpace(right)
+	}
+	return sameRouteAddress(left, right)
+}
+
+func sameRouteFlags(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftNormalized := append([]string(nil), left...)
+	rightNormalized := append([]string(nil), right...)
+	for index := range leftNormalized {
+		leftNormalized[index] = strings.ToLower(strings.TrimSpace(leftNormalized[index]))
+		rightNormalized[index] = strings.ToLower(strings.TrimSpace(rightNormalized[index]))
+	}
+	sort.Strings(leftNormalized)
+	sort.Strings(rightNormalized)
+	for index := range leftNormalized {
+		if leftNormalized[index] != rightNormalized[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeRouteType(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "unicast"
+	}
+	return value
+}
+
+func normalizeRouteScope(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "global"
+	}
+	return value
 }
 
 func isDefaultRoute(destination string) bool {

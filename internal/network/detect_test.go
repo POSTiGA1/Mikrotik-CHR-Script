@@ -215,7 +215,7 @@ func TestInspectRouteSetRejectsUntranslatedStaticRoute(t *testing.T) {
 		*defaultRoute,
 		{Destination: "192.0.2.0/24", Device: "ens3", Protocol: "kernel"},
 		{Destination: "203.0.113.0/24", Gateway: "192.0.2.2", Device: "ens3", Protocol: "static"},
-	}, defaultRoute, "ens3", "IPv4")
+	}, defaultRoute, "ens3", "IPv4", false)
 	if len(issues) != 1 || issues[0].Code != "unsupported-route" {
 		t.Fatalf("expected only the untranslated route to block, got %#v", issues)
 	}
@@ -226,9 +226,117 @@ func TestInspectRouteSetAllowsBareGatewayHostRoute(t *testing.T) {
 	issues := inspectRouteSet([]route{
 		*defaultRoute,
 		{Destination: "10.0.0.1", Device: "net0", Protocol: "static", Scope: "link"},
-	}, defaultRoute, "net0", "IPv4")
+	}, defaultRoute, "net0", "IPv4", false)
 	if len(issues) != 0 {
 		t.Fatalf("gateway host route was rejected: %#v", issues)
+	}
+}
+
+func TestDetectAllowsVultrDHCPRoutesThatMatchDefaultPath(t *testing.T) {
+	root := t.TempDir()
+	writeFixture := func(relative, content string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFixture("sys/class/net/enp1s0/device/driver", "virtio_net\n")
+	writeFixture("etc/netplan/50-cloud-init.yaml", "network:\n  ethernets:\n    enp1s0:\n      dhcp4: true\n      match:\n        macaddress: 56:00:06:7a:66:0f\n")
+	writeFixture("etc/resolv.conf", "nameserver 108.61.10.10\n")
+	writeFixture("run/systemd/netif/leases/2", "ADDRESS=70.34.254.194\nDNS=108.61.10.10\nCLASSLESS_ROUTES=0.0.0.0/0,70.34.254.1 169.254.169.254/32,70.34.254.1\n")
+
+	routes := []byte(`[
+		{"type":"unicast","dst":"default","gateway":"70.34.254.1","dev":"enp1s0","protocol":"dhcp","scope":"global","prefsrc":"70.34.254.194","metric":100,"flags":[]},
+		{"type":"unicast","dst":"70.34.254.0/23","dev":"enp1s0","protocol":"kernel","scope":"link","prefsrc":"70.34.254.194","metric":100,"flags":[]},
+		{"type":"unicast","dst":"70.34.254.1","dev":"enp1s0","protocol":"dhcp","scope":"link","prefsrc":"70.34.254.194","metric":100,"flags":[]},
+		{"type":"unicast","dst":"108.61.10.10","gateway":"70.34.254.1","dev":"enp1s0","protocol":"dhcp","scope":"global","prefsrc":"70.34.254.194","metric":100,"flags":[]},
+		{"type":"unicast","dst":"169.254.169.254","gateway":"70.34.254.1","dev":"enp1s0","protocol":"dhcp","scope":"global","prefsrc":"70.34.254.194","metric":100,"flags":[]}
+	]`)
+	addresses := []byte(`[{"ifindex":2,"ifname":"enp1s0","link_type":"ether","address":"56:00:06:7a:66:0f","addr_info":[{"family":"inet","local":"70.34.254.194","prefixlen":23,"scope":"global","dynamic":true,"protocol":"dhcp"}]}]`)
+	runner := fixtureRunner{responses: map[string][]byte{
+		"ip -j -4 route show table main": routes,
+		"ip -j -6 route show table main": []byte(`[]`),
+		"ip -j -4 rule show":             []byte(`[{"priority":0,"table":"local"},{"priority":32766,"table":"main"},{"priority":32767,"table":"default"}]`),
+		"ip -j -6 rule show":             []byte(`[{"priority":0,"table":"local"},{"priority":32766,"table":"main"}]`),
+		"ip -j address show":             addresses,
+		"ip -j link show dev enp1s0":     []byte(`[{"ifindex":2,"ifname":"enp1s0","mtu":1500,"address":"56:00:06:7a:66:0f","link_type":"ether"}]`),
+		"ip -j address show dev enp1s0":  addresses,
+	}}
+	plan, issues := Detect(context.Background(), runner, fixtureProber{result: model.DHCPProbe{Attempted: true, Offered: true, Address: "70.34.254.194", Server: "169.254.169.254"}}, root)
+	if plan.IPv4.Mode != "dhcp" || plan.IPv4.Evidence != model.EvidenceVerified {
+		t.Fatalf("unexpected DHCP plan: %#v", plan.IPv4)
+	}
+	var redundant int
+	for _, issue := range issues {
+		if issue.Severity == model.SeverityBlocker {
+			t.Fatalf("unexpected blocker: %#v", issue)
+		}
+		if issue.Code == "redundant-dhcp-route" {
+			redundant++
+		}
+	}
+	if redundant != 2 {
+		t.Fatalf("expected both provider routes to be recognized, got %#v", issues)
+	}
+}
+
+func TestRedundantDHCPRouteMustMatchEveryForwardingAttribute(t *testing.T) {
+	base := `{"type":"unicast","dst":"%s","gateway":"192.0.2.1","dev":"ens3","protocol":"dhcp","scope":"global","prefsrc":"192.0.2.20","metric":100,"flags":[]%s}`
+	decodePair := func(t *testing.T, defaultSuffix, candidateSuffix string) (route, *route) {
+		t.Helper()
+		data := fmt.Sprintf("["+base+","+base+"]", "default", defaultSuffix, "198.51.100.53", candidateSuffix)
+		routes, err := decodeRoutes([]byte(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return routes[1], &routes[0]
+	}
+	candidate, defaultRoute := decodePair(t, "", "")
+	if !isRedundantDHCPRoute(candidate, defaultRoute) {
+		t.Fatal("identical DHCP forwarding paths were not recognized")
+	}
+	issues := inspectRouteSet([]route{*defaultRoute, candidate}, defaultRoute, "ens3", "IPv4", false)
+	if len(issues) != 1 || issues[0].Severity != model.SeverityBlocker || issues[0].Code != "unsupported-route" {
+		t.Fatalf("DHCP exception escaped its DHCP-plan gate: %#v", issues)
+	}
+	candidate, defaultRoute = decodePair(t, `,"mtu":1400`, `,"mtu":1400`)
+	if !isRedundantDHCPRoute(candidate, defaultRoute) {
+		t.Fatal("matching additional forwarding attributes were rejected")
+	}
+	candidate, defaultRoute = decodePair(t, "", `,"mtu":1400`)
+	if isRedundantDHCPRoute(candidate, defaultRoute) {
+		t.Fatal("route with an additional MTU attribute was treated as redundant")
+	}
+
+	tests := []struct {
+		name   string
+		change func(*route, *route)
+	}{
+		{name: "candidate protocol", change: func(candidate, _ *route) { candidate.Protocol = "static" }},
+		{name: "default protocol", change: func(_, defaultRoute *route) { defaultRoute.Protocol = "static" }},
+		{name: "gateway", change: func(candidate, _ *route) { candidate.Gateway = "192.0.2.2" }},
+		{name: "device", change: func(candidate, _ *route) { candidate.Device = "ens4" }},
+		{name: "metric", change: func(candidate, _ *route) { candidate.Metric = 200 }},
+		{name: "preferred source", change: func(candidate, _ *route) { candidate.PrefSource = "192.0.2.21" }},
+		{name: "scope", change: func(candidate, _ *route) { candidate.Scope = "link" }},
+		{name: "flags", change: func(candidate, _ *route) { candidate.Flags = []string{"onlink"} }},
+		{name: "route type", change: func(candidate, _ *route) { candidate.Type = "blackhole" }},
+		{name: "IPv6 destination", change: func(candidate, _ *route) { candidate.Destination = "2001:db8::53" }},
+		{name: "invalid destination", change: func(candidate, _ *route) { candidate.Destination = "not-an-address" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := route{Type: "unicast", Destination: "198.51.100.53", Gateway: "192.0.2.1", Device: "ens3", Protocol: "dhcp", Scope: "global", PrefSource: "192.0.2.20", Metric: 100}
+			defaultRoute := route{Type: "unicast", Destination: "default", Gateway: "192.0.2.1", Device: "ens3", Protocol: "dhcp", Scope: "global", PrefSource: "192.0.2.20", Metric: 100}
+			test.change(&candidate, &defaultRoute)
+			if isRedundantDHCPRoute(candidate, &defaultRoute) {
+				t.Fatalf("mismatched route was treated as redundant: candidate=%#v default=%#v", candidate, defaultRoute)
+			}
+		})
 	}
 }
 
