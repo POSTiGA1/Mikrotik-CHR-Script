@@ -45,6 +45,21 @@ func Run(ctx context.Context, options Options) error {
 		}
 		return nil
 	}
+	if missing, offered := dependencyInstallOffer(reportValue); offered {
+		fmt.Fprint(options.Output, report.Format(reportValue))
+		confirmed, err := ui.ConfirmInitramfsToolsInstall(reportValue.Host, missing)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			return fmt.Errorf("required host-tool installation cancelled")
+		}
+		if err := installInitramfsTools(ctx, runner, reportValue.Host, options.Output); err != nil {
+			return fmt.Errorf("install required host tooling: %w", err)
+		}
+		fmt.Fprintln(options.Output, "Re-running preflight after installing host tooling…")
+		reportValue = preflight.Run(ctx, runner, network.DefaultProber{}, client, "/")
+	}
 	if reportValue.Blocked() {
 		fmt.Fprint(options.Output, report.Format(reportValue))
 		return fmt.Errorf("preflight found blocking conditions")
