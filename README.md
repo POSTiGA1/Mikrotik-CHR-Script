@@ -22,6 +22,7 @@ It is intentionally not a RouterOS hardening tool. It does not create passwords 
 - A reboot-observable serial or WWN for the target when additional physical disks are visible
 - One Ethernet uplink with a single routing policy
 - IPv4 DHCP or static addressing
+- Same-uplink DHCP routes whose complete forwarding attributes match the selected DHCP default route
 - IPv6 SLAAC, DHCPv6, static addressing, or combinations of those modes
 - Same-subnet and provider-routed/off-link gateways
 - Rescue-system direct writing, or a RAM-backed pre-root writer from normal Linux
@@ -74,6 +75,7 @@ During the default interactive run, if the only blockers are missing `mkinitramf
 - The CHR filesystem offset is read from its MBR; it is not hard-coded.
 - UEFI preparation requires the exact validated hybrid MBR/GPT geometry, matching primary and backup GPT CRCs, a bounded x86-64 EFI loader, and a bounded boot map. The generated FAT16 tables and copied files are read back before the image is authorized.
 - DHCP probing sends only a DHCPDISCOVER packet and never installs an address or route on Linux.
+- A non-default DHCP route needs no explicit RouterOS translation only when every observed forwarding attribute except its destination matches the selected DHCP default route. Different gateways, interfaces, protocols, metrics, preferred sources, scopes, flags, or other route attributes remain blockers.
 - The first-boot script identifies the RouterOS uplink using the existing virtual NIC MAC.
 - An unknown RouterOS version must pass structural checks and requires a typed acknowledgement. An incompatible layout is blocked.
 - A failed read-back checksum halts the writer instead of rebooting.

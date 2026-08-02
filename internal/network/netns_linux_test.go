@@ -61,7 +61,9 @@ func TestNetworkNamespacePlans(t *testing.T) {
 		config := "network:\n  ethernets:\n    uplink:\n      dhcp4: true\n"
 		fixture := newNamespaceFixture(t, 2, 1500, "nameserver 192.0.2.53\n", config)
 		fixture.startDHCPServer()
-		fixture.ip("route", "add", "default", "via", "192.0.2.1", "dev", "uplink", "onlink")
+		fixture.ip("route", "add", "default", "via", "192.0.2.1", "dev", "uplink", "proto", "dhcp", "metric", "100", "onlink")
+		fixture.ip("route", "add", "198.51.100.53/32", "via", "192.0.2.1", "dev", "uplink", "proto", "dhcp", "metric", "100", "onlink")
+		fixture.ip("route", "add", "169.254.169.254/32", "via", "192.0.2.1", "dev", "uplink", "proto", "dhcp", "metric", "100", "onlink")
 		plan, issues := Detect(context.Background(), fixture.runner(), namespaceDHCPProber{name: fixture.name}, fixture.root)
 		assertNoBlockers(t, issues)
 		if plan.IPv4.Mode != "dhcp" || !plan.DHCPProbe.Offered || plan.DHCPProbe.Address != "192.0.2.20" {
@@ -69,6 +71,15 @@ func TestNetworkNamespacePlans(t *testing.T) {
 		}
 		if plan.Evidence != model.EvidenceVerified || plan.IPv4.Evidence != model.EvidenceVerified {
 			t.Fatalf("established DHCP offer was not verified: %#v", plan)
+		}
+		var redundant int
+		for _, issue := range issues {
+			if issue.Code == "redundant-dhcp-route" {
+				redundant++
+			}
+		}
+		if redundant != 2 {
+			fixture.t.Fatalf("expected both DHCP routes to be recognized: %#v", issues)
 		}
 	})
 
