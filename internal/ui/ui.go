@@ -159,6 +159,21 @@ func ConfirmUntested(version string) error {
 	)).Run()
 }
 
+func ConfirmInitramfsToolsInstall(host model.Host, missing []string) (bool, error) {
+	confirmed := false
+	description := fmt.Sprintf(
+		"%s %s is missing %s. The installer will refresh APT metadata and install initramfs-tools-core, then rerun preflight. This changes host packages but does not touch the target disk.",
+		host.Distribution,
+		host.Version,
+		strings.Join(missing, ", "),
+	)
+	err := form(huh.NewGroup(
+		huh.NewNote().Title("Required host tooling is missing").Description(description),
+		huh.NewConfirm().Title("Install initramfs-tools-core now?").Value(&confirmed).Affirmative("Install").Negative("Cancel"),
+	)).Run()
+	return confirmed, err
+}
+
 func ConfirmDestruction(preflight model.Preflight, plan model.NetworkPlan) error {
 	phrase := ""
 	expected := "ERASE " + preflight.Disk.Fingerprint.Path

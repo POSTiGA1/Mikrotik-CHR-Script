@@ -59,6 +59,8 @@ The wizard will:
 
 There is no unattended mode and no reboot countdown.
 
+During the default interactive run, if the only blockers are missing `mkinitramfs` and/or `lsinitramfs` on a supported Debian or Ubuntu host, the installer shows the blocked report and offers to install `initramfs-tools-core` through APT. It refreshes package metadata and verifies both commands before rerunning preflight. Package installation requires explicit confirmation; `--preflight` and `--version` never install packages.
+
 ## Safety model
 
 - The target disk is derived from the filesystem backing `/`, then its ancestry and fingerprint are rechecked after review.

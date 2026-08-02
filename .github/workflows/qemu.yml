@@ -10,6 +10,29 @@ permissions:
   contents: read
 
 jobs:
+  dependency-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: true
+      - name: Build dependency integration test
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: go test -c -tags=integration -o /tmp/chr-install-app.test ./internal/app
+      - name: Install and verify tooling on Ubuntu 26.04
+        run: |
+          docker run --rm \
+            --env CHR_DEPENDENCY_INTEGRATION=1 \
+            --volume /tmp/chr-install-app.test:/chr-install-app.test:ro \
+            ubuntu:26.04 \
+            /chr-install-app.test -test.v -test.run TestInitramfsDependencyInstallUbuntu2604 -test.timeout 9m
+
   network-namespaces:
     runs-on: ubuntu-latest
     timeout-minutes: 10
