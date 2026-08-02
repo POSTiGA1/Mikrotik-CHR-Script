@@ -17,7 +17,7 @@ It is intentionally not a RouterOS hardening tool. It does not create passwords 
 - AMD64 only
 - Debian 12 and 13
 - Ubuntu 22.04, 24.04, and 26.04 LTS
-- Firmware modes validated for the exact RouterOS release (7.21.5: legacy BIOS)
+- Firmware modes validated for the exact RouterOS release (7.21.5: legacy BIOS and installer-prepared UEFI)
 - One unambiguous local boot disk
 - A reboot-observable serial or WWN for the target when additional physical disks are visible
 - One Ethernet uplink with a single routing policy
@@ -28,7 +28,7 @@ It is intentionally not a RouterOS hardening tool. It does not create passwords 
 
 The preflight rejects RAID, multipath, ambiguous rescue disks, multiple uplinks/default routes, policy routing, VLANs, bonds, bridges, PPP, and other layouts that v1 cannot translate credibly.
 
-V1 also blocks a Linux host that is currently booted with UEFI unless that exact long-term CHR image has passed native UEFI boot testing. RouterOS v7 supports UEFI on x86 in general, but the official CHR 7.21.5 raw image has only legacy MBR partitions and fell through to the OVMF shell in testing. Treating those as equivalent would be unsafe.
+V1 blocks a UEFI-booted Linux host unless that exact long-term CHR release has passed the installer's UEFI preparation and boot matrix. The official CHR 7.21.5 image places `BOOTX64.EFI` and its boot map on an ext2 partition that standard UEFI firmware cannot read. On a validated UEFI host, the installer copies those verified files into a deterministic FAT16 filesystem in the same existing 32 MiB EFI-designated partition. It does not add or move partitions, and BIOS hosts retain the official ext2 boot partition unchanged.
 
 ## Run preflight first
 
@@ -70,6 +70,7 @@ There is no unattended mode and no reboot countdown.
 - The built initramfs is inventoried before reboot; its compressed and unpacked sizes plus a runtime reserve must fit in installed RAM.
 - GRUB staging requires a plain ext2/3/4 boot filesystem, installs dedicated `next_entry` handling, and verifies the armed one-shot entry before rebooting.
 - The CHR filesystem offset is read from its MBR; it is not hard-coded.
+- UEFI preparation requires the exact validated hybrid MBR/GPT geometry, matching primary and backup GPT CRCs, a bounded x86-64 EFI loader, and a bounded boot map. The generated FAT16 tables and copied files are read back before the image is authorized.
 - DHCP probing sends only a DHCPDISCOVER packet and never installs an address or route on Linux.
 - The first-boot script identifies the RouterOS uplink using the existing virtual NIC MAC.
 - An unknown RouterOS version must pass structural checks and requires a typed acknowledgement. An incompatible layout is blocked.

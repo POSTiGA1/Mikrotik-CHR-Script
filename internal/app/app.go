@@ -59,7 +59,7 @@ func Run(ctx context.Context, options Options) error {
 	}
 	defer os.RemoveAll(workDir)
 	fmt.Fprintf(options.Output, "Downloading and validating RouterOS %s from MikroTik…\n", reportValue.Release.Version)
-	prepared, err := client.Prepare(ctx, runner, reportValue.Release, review.Network, workDir)
+	prepared, err := client.Prepare(ctx, runner, reportValue.Release, review.Network, workDir, reportValue.Host.Firmware)
 	if err != nil {
 		return err
 	}

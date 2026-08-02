@@ -14,7 +14,7 @@ import (
 )
 
 func TestResolveLatest(t *testing.T) {
-	checksum := fmt.Sprintf("%x", sha256.Sum256([]byte("archive")))
+	checksum := testedVersions["7.21.5"].UEFIArchiveSHA256
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/latest":
@@ -33,8 +33,33 @@ func TestResolveLatest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if release.Version != "7.21.5" || release.Checksum != checksum || !release.Tested || release.UEFIBoot {
+	if release.Version != "7.21.5" || release.Checksum != checksum || !release.Tested || !release.UEFIBoot {
 		t.Fatalf("unexpected release: %#v", release)
+	}
+}
+
+func TestResolveLatestDisablesUEFIForChangedArchive(t *testing.T) {
+	checksum := fmt.Sprintf("%x", sha256.Sum256([]byte("replacement archive")))
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/latest":
+			_, _ = writer.Write([]byte("7.21.5 1234\n"))
+		case "/7.21.5/chr-7.21.5.img.zip.sha256":
+			_, _ = fmt.Fprintf(writer, "%s  chr-7.21.5.img.zip\n", checksum)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.UpgradeURL = server.URL + "/latest"
+	client.DownloadBase = server.URL
+	release, err := client.ResolveLatest(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release.UEFIBoot {
+		t.Fatalf("changed archive was incorrectly authorized for UEFI: %#v", release)
 	}
 }
 

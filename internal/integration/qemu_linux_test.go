@@ -76,7 +76,11 @@ func TestQEMUBoot(t *testing.T) {
 		}
 		t.Logf("preserving CHR artifacts in %s", directory)
 	}
-	prepared, err := client.Prepare(ctx, command.OSRunner{}, release, plan, directory)
+	firmwareMode := "BIOS"
+	if os.Getenv("CHR_QEMU_FIRMWARE") == "uefi" {
+		firmwareMode = "UEFI"
+	}
+	prepared, err := client.Prepare(ctx, command.OSRunner{}, release, plan, directory, firmwareMode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +106,6 @@ func TestQEMUBoot(t *testing.T) {
 	}
 	arguments = append(arguments, diskArgs...)
 	arguments = append(arguments, nicArgs...)
-	expectUEFIBlock := os.Getenv("CHR_QEMU_EXPECT_UEFI_BLOCK") == "1"
 	if os.Getenv("CHR_QEMU_FIRMWARE") == "uefi" {
 		firmware, err := findOVMF()
 		if err != nil {
@@ -133,11 +136,6 @@ func TestQEMUBoot(t *testing.T) {
 			count, _ := connection.Read(banner)
 			_ = connection.Close()
 			if strings.HasPrefix(string(banner[:count]), "SSH-") {
-				if expectUEFIBlock {
-					_ = process.Process.Kill()
-					<-done
-					t.Fatal("official CHR raw image unexpectedly booted with UEFI; update the version-specific preflight gate after validating it")
-				}
 				if err := verifyRouterOSConsole(console, plan); err != nil {
 					_ = process.Process.Kill()
 					<-done
@@ -146,14 +144,6 @@ func TestQEMUBoot(t *testing.T) {
 				_ = process.Process.Kill()
 				<-done
 				t.Logf("RouterOS %s became reachable through the configured static address", release.Version)
-				return
-			}
-		}
-		if expectUEFIBlock {
-			if strings.Contains(console.Snapshot(), "UEFI Interactive Shell") {
-				_ = process.Process.Kill()
-				<-done
-				t.Logf("RouterOS %s raw image was correctly classified as not native-UEFI bootable", release.Version)
 				return
 			}
 		}

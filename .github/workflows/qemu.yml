@@ -77,7 +77,6 @@ jobs:
           - firmware: uefi
             disk: virtio
             nic: virtio
-            expect_uefi_block: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -86,11 +85,10 @@ jobs:
           cache: true
       - name: Install QEMU and filesystem tools
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
-      - name: Boot official CHR image
+      - name: Boot prepared CHR image
         env:
           CHR_QEMU_INTEGRATION: "1"
           CHR_QEMU_FIRMWARE: ${{ matrix.firmware }}
           CHR_QEMU_DISK: ${{ matrix.disk }}
           CHR_QEMU_NIC: ${{ matrix.nic }}
-          CHR_QEMU_EXPECT_UEFI_BLOCK: ${{ matrix.expect_uefi_block }}
-        run: sudo --preserve-env=CHR_QEMU_INTEGRATION,CHR_QEMU_FIRMWARE,CHR_QEMU_DISK,CHR_QEMU_NIC,CHR_QEMU_EXPECT_UEFI_BLOCK env "PATH=$PATH" go test -tags=integration -run TestQEMUBoot ./internal/integration -v -timeout 12m
+        run: sudo --preserve-env=CHR_QEMU_INTEGRATION,CHR_QEMU_FIRMWARE,CHR_QEMU_DISK,CHR_QEMU_NIC env "PATH=$PATH" go test -tags=integration -run TestQEMUBoot ./internal/integration -v -timeout 12m

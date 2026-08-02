@@ -51,7 +51,7 @@ func requiredToolIssues(runner command.Runner) []model.Issue {
 func assessRelease(host model.Host, release model.Release) []model.Issue {
 	var issues []model.Issue
 	if host.Firmware == "UEFI" && !release.UEFIBoot {
-		issues = append(issues, model.Issue{Severity: model.SeverityBlocker, Code: "uefi-boot", Message: fmt.Sprintf("the official CHR %s raw image has not passed native UEFI boot validation; v1 refuses to erase this UEFI-booted host", release.Version)})
+		issues = append(issues, model.Issue{Severity: model.SeverityBlocker, Code: "uefi-boot", Message: fmt.Sprintf("RouterOS %s has not passed this installer's UEFI preparation and boot validation; v1 refuses to erase this UEFI-booted host", release.Version)})
 	}
 	if !release.Tested {
 		issues = append(issues, model.Issue{Severity: model.SeverityWarning, Code: "untested-release", Message: fmt.Sprintf("RouterOS %s has not completed this installer's QEMU test matrix; its image structure will be checked before confirmation", release.Version)})
