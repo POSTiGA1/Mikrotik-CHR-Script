@@ -35,15 +35,20 @@ const (
 var versionPattern = regexp.MustCompile(`^7\.[0-9]+(?:\.[0-9]+)?$`)
 
 type testedRelease struct {
-	BIOS bool
-	UEFI bool
+	BIOS              bool
+	UEFI              bool
+	UEFIArchiveSHA256 string
 }
 
-// Versions are added only after image injection and real CHR boot testing. The
-// official 7.21.5 raw image boots with legacy BIOS but has no EFI boot partition
-// and falls through to the OVMF shell.
+// Versions are added only after image injection and real CHR boot testing. CHR
+// 7.21.5 uses ext2 for its EFI-designated boot partition, so UEFI support means
+// the installer-prepared FAT16 variant has passed the full OVMF matrix.
 var testedVersions = map[string]testedRelease{
-	"7.21.5": {BIOS: true, UEFI: false},
+	"7.21.5": {
+		BIOS:              true,
+		UEFI:              true,
+		UEFIArchiveSHA256: "dbb8f1739da73a68e5167fcbc731a5ba3d50f9d9b195731b96f96fcc58904580",
+	},
 }
 
 type Client struct {
@@ -87,7 +92,6 @@ func (client *Client) ResolveLatest(ctx context.Context) (model.Release, error) 
 		ImageURL:      base,
 		ChecksumURL:   base + ".sha256",
 		Tested:        support.BIOS,
-		UEFIBoot:      support.UEFI,
 		Compatibility: "pending structural validation",
 	}
 	checksum, err := client.fetchChecksum(ctx, release.ChecksumURL)
@@ -95,15 +99,25 @@ func (client *Client) ResolveLatest(ctx context.Context) (model.Release, error) 
 		return model.Release{}, err
 	}
 	release.Checksum = checksum
+	release.UEFIBoot = support.UEFI && support.UEFIArchiveSHA256 != "" && strings.EqualFold(checksum, support.UEFIArchiveSHA256)
 	return release, nil
 }
 
-func (client *Client) Prepare(ctx context.Context, runner command.Runner, release model.Release, plan model.NetworkPlan, workDir string) (PreparedImage, error) {
+func (client *Client) Prepare(ctx context.Context, runner command.Runner, release model.Release, plan model.NetworkPlan, workDir, firmware string) (PreparedImage, error) {
 	if err := network.Validate(plan); err != nil {
 		return PreparedImage{}, err
 	}
+	if firmware != "BIOS" && firmware != "UEFI" {
+		return PreparedImage{}, fmt.Errorf("unsupported installation firmware %q", firmware)
+	}
 	if release.Version == "" || release.ImageURL == "" || release.Checksum == "" {
 		return PreparedImage{}, fmt.Errorf("release metadata is incomplete")
+	}
+	if firmware == "UEFI" {
+		support := testedVersions[release.Version]
+		if !release.UEFIBoot || !support.UEFI || support.UEFIArchiveSHA256 == "" || !strings.EqualFold(release.Checksum, support.UEFIArchiveSHA256) {
+			return PreparedImage{}, fmt.Errorf("RouterOS %s archive has not passed this installer's UEFI boot matrix", release.Version)
+		}
 	}
 	if err := os.MkdirAll(workDir, 0o700); err != nil {
 		return PreparedImage{}, err
@@ -127,6 +141,11 @@ func (client *Client) Prepare(ctx context.Context, runner command.Runner, releas
 	if err != nil {
 		return PreparedImage{}, fmt.Errorf("CHR image is structurally incompatible: %w", err)
 	}
+	if firmware == "UEFI" {
+		if _, err := validateOfficialUEFIGPT(imagePath, layout); err != nil {
+			return PreparedImage{}, fmt.Errorf("CHR image is structurally incompatible for UEFI: %w", err)
+		}
+	}
 	script, err := network.RouterOSScript(plan)
 	if err != nil {
 		return PreparedImage{}, err
@@ -135,11 +154,19 @@ func (client *Client) Prepare(ctx context.Context, runner command.Runner, releas
 	if err != nil {
 		return PreparedImage{}, fmt.Errorf("CHR image is structurally incompatible: %w", err)
 	}
+	if firmware == "UEFI" {
+		if err := prepareUEFIImage(ctx, runner, imagePath, layout); err != nil {
+			return PreparedImage{}, fmt.Errorf("prepare CHR image for UEFI: %w", err)
+		}
+	}
 	imageHash, imageSize, err := HashFile(imagePath)
 	if err != nil {
 		return PreparedImage{}, fmt.Errorf("hash prepared CHR image: %w", err)
 	}
 	release.Compatibility = "structure validated"
+	if firmware == "UEFI" {
+		release.Compatibility = "structure and UEFI preparation validated"
+	}
 	return PreparedImage{
 		Path:          imagePath,
 		SizeBytes:     imageSize,
